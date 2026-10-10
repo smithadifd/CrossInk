@@ -1,0 +1,7 @@
+{
+  "image_url": "http://192.168.1.50:8080/desk/status.bmp",
+  "version_url": "http://192.168.1.50:8080/desk/version",
+  "webhook_url": "http://192.168.1.50:8080/desk/action",
+  "poll_s": 60,
+  "full_refresh_every": 20
+}
