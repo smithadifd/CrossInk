@@ -80,9 +80,10 @@ Touch rectangles on a 480 x 800 screen (end values exclusive):
 | `evening` | 8-232 | 688-752 |
 | `restore` | 248-472 | 688-752 |
 
-Each rectangle is its cell inset by 8 px. The bottom row stops at y = 752, where the screen's bottom-edge
-gesture band (the lowest 6%, 48 px) begins, so the lowest part of the two bottom boxes the server draws does not
-respond; the centre of each box does. Taps between the rectangles do nothing. The left-edge Back swipe is a
+Each rectangle is its cell inset by 8 px; right and bottom edges are exclusive. The bottom row stops at y = 752,
+where the screen's bottom-edge gesture band (the lowest 6%, 48 px) begins. The server draws exactly these
+rectangles (desk-panel clips its bottom boxes at 752 too), so every drawn box is tappable edge to edge. Taps
+between the rectangles do nothing. The left-edge Back swipe is a
 horizontal swipe, so it does not conflict with taps inside the left cells.
 
 The Home key and bottom-edge Home swipe also leave Desk mode, like on any other screen. Depending on the
