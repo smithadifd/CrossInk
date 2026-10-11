@@ -7,27 +7,49 @@
 #include <Logging.h>
 #include <SecureHttpClient.h>
 #include <WiFi.h>
+#include <WiFiClient.h>
+#include <strings.h>
 
+#include <algorithm>
 #include <cctype>
+#include <cstddef>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 #include "SdCardFontSystem.h"
 #include "activities/network/WifiSelectionActivity.h"
 #include "fontIds.h"
-#include "network/HttpDownloader.h"
 
 namespace {
 constexpr char IMAGE_DIR[] = "/.crosspoint/desk";
 constexpr char IMAGE_PATH[] = "/.crosspoint/desk/status.bmp";
+constexpr char STAGED_PATH[] = "/.crosspoint/desk/status.new";
 
-constexpr uint32_t HTTP_TIMEOUT_MS = 3000;            // version GET and webhook POST
+// The server renders exactly this bitmap: 1 bit per pixel, portrait.
+constexpr int32_t IMAGE_WIDTH = 480;
+constexpr int32_t IMAGE_HEIGHT = 800;
+constexpr size_t MAX_IMAGE_BYTES = 128 * 1024;  // a valid image is about 48 KB; refuse anything absurd
+
+constexpr uint32_t HTTP_TIMEOUT_MS = 3000;            // per socket operation: version GET, image GET, webhook POST
+constexpr unsigned long IMAGE_BUDGET_MS = 15000;      // wall-clock cap for one image download
+constexpr uint32_t PROBE_TIMEOUT_MS = 1500;           // reachability probe after a webhook with no reply
 constexpr size_t MAX_VERSION_BYTES = 128;             // version text is a short token, not a document
 constexpr unsigned long TOAST_MS = 2500;              // how long an action acknowledgement stays up
-constexpr unsigned long POLL_AFTER_ACTION_MS = 2000;  // give the server time to redraw after a webhook
+constexpr unsigned long ACTION_COOLDOWN_MS = 1000;    // ignore further actions after one completes
+constexpr unsigned long POLL_AFTER_ACTION_MS = 2000;  // first look for the server's redraw after a webhook
+constexpr unsigned long FOLLOW_UP_POLL_AFTER_ACTION_MS = 6000;  // second look, for slower server renders
+constexpr unsigned long MAX_BACKOFF_S = 300;                    // offline backoff grows to this (never below poll_s)
+constexpr uint8_t MAX_BACKOFF_DOUBLINGS = 8;
+constexpr uint32_t HEAP_LOG_EVERY_POLLS = 10;
 
-// The bottom 2x2 grid of touch cells (the server draws matching boxes). Each cell is half the
-// screen wide and ZONE_ROW_HEIGHT tall, so the grid occupies the bottom 2 * ZONE_ROW_HEIGHT pixels.
+// Touch zones: the bottom 2x2 grid of cells. Each cell is half the screen wide and ZONE_ROW_HEIGHT tall. A
+// rectangle is its cell inset by ZONE_INSET, matching the boxes the server draws. The bottom row is also
+// cut off where the bottom-edge gesture band starts (the same 6% MappedInputManager reserves), so a tap
+// never lands in that band.
 constexpr int ZONE_ROW_HEIGHT = 120;
+constexpr int ZONE_INSET = 8;
+constexpr int BOTTOM_EDGE_BAND_PERCENT = 6;
 
 struct ActionInfo {
   const char* name;   // value of the "action" field in the webhook body
@@ -40,37 +62,74 @@ constexpr ActionInfo ACTIONS[] = {
     {"restore", "Restore"},
 };
 
+constexpr uint32_t FNV_OFFSET = 2166136261u;
+constexpr uint32_t FNV_PRIME = 16777619u;
+
 bool isDue(const unsigned long now, const unsigned long at) { return static_cast<long>(now - at) >= 0; }
 
-// Rejects bodies that are not a readable BMP before they can replace the last good image.
-bool validateBmp(const std::string& path) {
+// Accepts only a complete 1-bit IMAGE_WIDTH x IMAGE_HEIGHT BMP that the renderer can draw. The size check
+// catches bodies cut short, which would otherwise draw as a half-black image.
+bool validateBmp(const char* path) {
   FsFile file;
   if (!Storage.openFileForRead("DESK", path, file)) return false;
+
+  BmpHeader header{};
+  constexpr size_t headerBytes = 54;  // BITMAPFILEHEADER (14) + BITMAPINFOHEADER (40), before the palette
+  static_assert(offsetof(BmpHeader, colors) == headerBytes, "unexpected BMP header layout");
+  const bool headerRead = file.read(&header, headerBytes) == static_cast<int>(headerBytes);
+  const size_t fileSize = file.fileSize();
+  if (!headerRead) {
+    file.close();
+    LOG_ERR("DESK", "Image rejected: short header");
+    return false;
+  }
+
+  const int32_t height = header.infoHeader.biHeight < 0 ? -header.infoHeader.biHeight : header.infoHeader.biHeight;
+  const uint64_t rowBytes = static_cast<uint64_t>((header.infoHeader.biWidth + 31) / 32) * 4;
+  const uint64_t requiredSize =
+      static_cast<uint64_t>(header.fileHeader.bfOffBits) + rowBytes * static_cast<uint64_t>(height);
+  if (header.fileHeader.bfType != 0x4D42 || header.infoHeader.biSize < 40 || header.infoHeader.biPlanes != 1 ||
+      header.infoHeader.biBitCount != 1 || header.infoHeader.biCompression != 0 ||
+      header.infoHeader.biWidth != IMAGE_WIDTH || height != IMAGE_HEIGHT || header.fileHeader.bfOffBits < headerBytes ||
+      fileSize < requiredSize) {
+    file.close();
+    LOG_ERR("DESK", "Image rejected: bpp=%u w=%ld h=%ld size=%u need=%u", header.infoHeader.biBitCount,
+            static_cast<long>(header.infoHeader.biWidth), static_cast<long>(header.infoHeader.biHeight),
+            static_cast<unsigned>(fileSize), static_cast<unsigned>(requiredSize));
+    return false;
+  }
+
   Bitmap bitmap(file);
   const BmpReaderError err = bitmap.parseHeaders();
   file.close();
   if (err != BmpReaderError::Ok) {
-    LOG_ERR("DESK", "Downloaded image is not a usable BMP: %s", Bitmap::errorToString(err));
+    LOG_ERR("DESK", "Image rejected by renderer: %s", Bitmap::errorToString(err));
     return false;
   }
   return true;
 }
 
-// FNV-1a over the file, used to skip a redraw when the server returned an identical image.
-bool hashFile(const char* path, uint32_t& hash) {
-  FsFile file;
-  if (!Storage.openFileForRead("DESK", path, file)) return false;
-  uint8_t buf[256];
-  uint32_t h = 2166136261u;
-  int n;
-  while ((n = file.read(buf, sizeof(buf))) > 0) {
-    for (int i = 0; i < n; i++) {
-      h = (h ^ buf[i]) * 16777619u;
-    }
-  }
-  file.close();
-  hash = h;
-  return true;
+// True if a TCP connection to the URL's host:port can be opened. Used only after a webhook got no HTTP reply,
+// to tell "the server took the request but did not answer" from "the server is not there at all".
+bool tcpReachable(const std::string& url, const uint32_t timeoutMs) {
+  const size_t schemeEnd = url.find("://");
+  if (schemeEnd == std::string::npos) return false;
+  const size_t hostStart = schemeEnd + 3;
+  const size_t pathStart = url.find('/', hostStart);
+  const std::string hostPort =
+      pathStart == std::string::npos ? url.substr(hostStart) : url.substr(hostStart, pathStart - hostStart);
+  const size_t portSep = hostPort.rfind(':');
+  const std::string host = portSep == std::string::npos ? hostPort : hostPort.substr(0, portSep);
+  const bool https = strncasecmp(url.c_str(), "https", 5) == 0;
+  const uint16_t port =
+      portSep == std::string::npos ? (https ? 443 : 80) : static_cast<uint16_t>(atoi(hostPort.c_str() + portSep + 1));
+  if (host.empty()) return false;
+
+  WiFiClient client;
+  client.setConnectionTimeout(timeoutMs);
+  const bool connected = client.connect(host.c_str(), port);
+  client.stop();
+  return connected;
 }
 }  // namespace
 
@@ -84,15 +143,24 @@ bool DeskActivity::preventAutoSleep() {
 
 void DeskActivity::onEnter() {
   Activity::onEnter();
+  {
+    // The image and touch zones are laid out for portrait whatever orientation the reader last used.
+    RenderLock lock;
+    savedOrientation = renderer.getOrientation();
+    renderer.setOrientation(GfxRenderer::Portrait);
+  }
   // Free SD-font RAM before network/TLS work, as the other Wi-Fi activities do.
   sdFontSystem.releaseForNetwork(renderer);
   Storage.mkdir(IMAGE_DIR);
+  recoverStagedImage();
 
   std::string error;
   if (!DeskConfig::load(config, error)) {
-    RenderLock lock;
-    phase = Phase::CONFIG_ERROR;
-    configError = error;
+    {
+      RenderLock lock;
+      phase = Phase::CONFIG_ERROR;
+      configError = error;
+    }
     requestUpdate();
     return;
   }
@@ -107,7 +175,14 @@ void DeskActivity::onEnter() {
 
 void DeskActivity::onExit() {
   Activity::onExit();
+  // ActivityManager calls onExit() with the render lock held, so no RenderLock here.
+  renderer.setOrientation(savedOrientation);
 
+  if (wifiTuned && WiFi.getMode() != WIFI_MODE_NULL) {
+    // Undo the keep-alive tuning even when Wi-Fi was already up and stays up for the next screen.
+    WiFi.setSleep(true);
+    WiFi.setAutoReconnect(prevAutoReconnect);
+  }
   if (shouldTearDownWifiOnExit && WiFi.getMode() != WIFI_MODE_NULL) {
     WiFi.disconnect(false);
     delay(30);
@@ -135,13 +210,16 @@ void DeskActivity::onWifiSelectionComplete(const bool connected) {
 
 void DeskActivity::startRunning() {
   // Same keep-alive settings as the web server: without them the radio naps between polls and the
-  // first request after idle time often fails.
+  // first request after idle time often fails. onExit() restores the previous values.
+  prevAutoReconnect = WiFi.getAutoReconnect();
   WiFi.setSleep(false);
   WiFi.setAutoReconnect(true);
+  wifiTuned = true;
   {
     RenderLock lock;
     phase = Phase::RUNNING;
     forceFullRefresh = true;  // clean repaint after the Wi-Fi screens
+    overlayOnlyRender = false;
   }
   pollRequested = true;  // fetch immediately instead of waiting a full interval
   requestUpdate();
@@ -160,14 +238,21 @@ void DeskActivity::loop() {
     {
       RenderLock lock;
       toast[0] = '\0';
+      overlayOnlyRender = true;
     }
     requestUpdate();
   }
 
+  // Always read the input so a press during the cooldown is consumed rather than replayed afterwards.
   DeskAction action;
   if (readRequestedAction(action)) {
-    sendAction(action);
-    return;
+    if (cooldownActive && !isDue(now, ignoreActionsUntil)) {
+      LOG_DBG("DESK", "Action ignored during cooldown");
+    } else {
+      cooldownActive = false;
+      sendAction(action);
+      return;
+    }
   }
 
   if (mappedInput.wasPressed(MappedInputManager::Button::Left)) {
@@ -181,9 +266,34 @@ void DeskActivity::loop() {
     requestUpdate();
   }
 
+  if (followUpPending && isDue(now, followUpPollAt)) {
+    followUpPending = false;
+    pollRequested = true;
+  }
+
   if (pollRequested || isDue(now, nextPollAt)) {
     pollOnce();
   }
+}
+
+bool DeskActivity::zoneAt(const int x, const int y, DeskAction& action) const {
+  const int width = renderer.getScreenWidth();
+  const int height = renderer.getScreenHeight();
+  const int gridTop = height - 2 * ZONE_ROW_HEIGHT;
+  const int bottomLimit = height - height * BOTTOM_EDGE_BAND_PERCENT / 100;
+  if (y < gridTop) return false;
+
+  const int col = x >= width / 2 ? 1 : 0;
+  const int row = y >= gridTop + ZONE_ROW_HEIGHT ? 1 : 0;
+  const int left = col * (width / 2) + ZONE_INSET;
+  const int right = (col + 1) * (width / 2) - ZONE_INSET;
+  const int top = gridTop + row * ZONE_ROW_HEIGHT + ZONE_INSET;
+  const int bottom = std::min(gridTop + (row + 1) * ZONE_ROW_HEIGHT - ZONE_INSET, bottomLimit);
+  if (x < left || x >= right || y < top || y >= bottom) return false;
+
+  action = row == 0 ? (col == 0 ? DeskAction::VIDEO_CALL : DeskAction::FOCUS)
+                    : (col == 0 ? DeskAction::EVENING : DeskAction::RESTORE);
+  return true;
 }
 
 bool DeskActivity::readRequestedAction(DeskAction& action) const {
@@ -208,27 +318,23 @@ bool DeskActivity::readRequestedAction(DeskAction& action) const {
   int x = 0;
   int y = 0;
   if (mappedInput.hasTouch() && mappedInput.wasScreenTapped(x, y)) {
-    const int gridTop = renderer.getScreenHeight() - 2 * ZONE_ROW_HEIGHT;
-    if (y < gridTop) return false;
-    const bool right = x >= renderer.getScreenWidth() / 2;
-    const bool bottom = y >= gridTop + ZONE_ROW_HEIGHT;
-    action = bottom ? (right ? DeskAction::RESTORE : DeskAction::EVENING)
-                    : (right ? DeskAction::FOCUS : DeskAction::VIDEO_CALL);
-    return true;
+    return zoneAt(x, y, action);
   }
   return false;
 }
 
 void DeskActivity::sendAction(const DeskAction action) {
-  const ActionInfo& info = ACTIONS[static_cast<size_t>(action)];
-  char text[TOAST_CAPACITY];
+  if (actionInFlight) return;
+  actionInFlight = true;
 
+  const ActionInfo& info = ACTIONS[static_cast<size_t>(action)];
+  const bool wifiUp = WiFi.status() == WL_CONNECTED;
   int code = -1;
-  if (WiFi.status() == WL_CONNECTED) {
+  if (wifiUp) {
     char body[48];
     snprintf(body, sizeof(body), "{\"action\":\"%s\"}", info.name);
     freeink::SecureHttpClient http;
-    http.setInsecure();  // plain http on the LAN is the expected case; https skips verification like the other clients
+    http.setInsecure();  // no certificate verification for https, see docs/desk-mode.md
     http.setTimeout(HTTP_TIMEOUT_MS);
     if (http.begin(config.webhookUrl)) {
       http.addHeader("Content-Type", "application/json");
@@ -239,21 +345,37 @@ void DeskActivity::sendAction(const DeskAction action) {
     }
   }
 
+  // A transport failure after the request may already have gone out is not a failure the user should retry:
+  // if the server still accepts connections, report "sent (no reply)" so they do not press again.
   const bool ok = code >= 200 && code < 300;
-  LOG_INF("DESK", "Action %s -> %d", info.name, code);
+  const bool noReply = !ok && code <= 0 && wifiUp && tcpReachable(config.webhookUrl, PROBE_TIMEOUT_MS);
+  LOG_INF("DESK", "Action %s -> %d%s", info.name, code, noReply ? " (no reply, server reachable)" : "");
+
+  char text[TOAST_CAPACITY];
   if (ok) {
     snprintf(text, sizeof(text), "%s - sent", info.label);
+  } else if (noReply) {
+    snprintf(text, sizeof(text), "%s - sent (no reply)", info.label);
   } else if (code > 0) {
     snprintf(text, sizeof(text), "%s failed (HTTP %d)", info.label, code);
+  } else if (!wifiUp) {
+    snprintf(text, sizeof(text), "%s failed (no Wi-Fi)", info.label);
   } else {
-    snprintf(text, sizeof(text), "%s failed (no response)", info.label);
+    snprintf(text, sizeof(text), "%s failed (unreachable)", info.label);
   }
   setToast(text, TOAST_MS);
 
-  if (ok) {
-    // The server usually redraws the image in response; look for it soon rather than at the next interval.
-    nextPollAt = millis() + POLL_AFTER_ACTION_MS;
+  if (ok || noReply) {
+    // The server usually redraws in response; look for it soon, and again once slower renders have finished.
+    const unsigned long now = millis();
+    nextPollAt = now + POLL_AFTER_ACTION_MS;
+    followUpPending = true;
+    followUpPollAt = now + FOLLOW_UP_POLL_AFTER_ACTION_MS;
   }
+
+  actionInFlight = false;
+  cooldownActive = true;
+  ignoreActionsUntil = millis() + ACTION_COOLDOWN_MS;
 }
 
 void DeskActivity::setToast(const char* text, const unsigned long durationMs) {
@@ -261,6 +383,7 @@ void DeskActivity::setToast(const char* text, const unsigned long durationMs) {
     RenderLock lock;
     snprintf(toast, sizeof(toast), "%s", text);
     toastUntil = millis() + durationMs;
+    overlayOnlyRender = true;
   }
   requestUpdate();
 }
@@ -270,6 +393,7 @@ void DeskActivity::setOnline(const bool value) {
   {
     RenderLock lock;
     online = value;
+    overlayOnlyRender = true;
   }
   requestUpdate();
 }
@@ -298,21 +422,149 @@ bool DeskActivity::fetchVersion(std::string& out) {
   return true;
 }
 
-bool DeskActivity::downloadImage() {
-  HttpDownloader::DownloadOptions options;
-  // Stage as status.bmp.part and rename only after validateBmp() passes, so a failed or truncated
-  // download never replaces the last good image.
-  options.stageAsPart = true;
-  options.validate = validateBmp;
-
-  // Hold the render lock so the render task cannot be reading status.bmp while it is swapped. Only
-  // this task wants to render meanwhile, so nothing else is starved.
-  RenderLock lock;
-  const auto result = HttpDownloader::downloadToFile(config.imageUrl, IMAGE_PATH, nullptr, nullptr, "", "", options);
-  if (result != HttpDownloader::OK) {
-    LOG_ERR("DESK", "Image download failed: %d", static_cast<int>(result));
+// Streams image_url into status.new and validates it. Takes no RenderLock: nothing here touches status.bmp,
+// which the render task may be reading. Bounded by HTTP_TIMEOUT_MS per socket operation and IMAGE_BUDGET_MS overall.
+bool DeskActivity::downloadToStaging(uint32_t& hash) {
+  if (Storage.exists(STAGED_PATH)) Storage.remove(STAGED_PATH);
+  FsFile file;
+  if (!Storage.openFileForWrite("DESK", STAGED_PATH, file)) {
+    LOG_ERR("DESK", "Cannot open %s for writing", STAGED_PATH);
     return false;
   }
+
+  freeink::SecureHttpClient http;
+  http.setInsecure();
+  http.setTimeout(HTTP_TIMEOUT_MS);
+  if (!http.begin(config.imageUrl)) {
+    LOG_ERR("DESK", "Bad image URL: %s", config.imageUrl.c_str());
+    file.close();
+    Storage.remove(STAGED_PATH);
+    return false;
+  }
+
+  const unsigned long deadline = millis() + IMAGE_BUDGET_MS;
+  size_t written = 0;
+  uint32_t running = FNV_OFFSET;
+  bool writeFailed = false;
+  bool tooLarge = false;
+  const int code = http.GET(
+      [&](const uint8_t* data, const size_t len) {
+        if (http.getStatus() != 200) return true;  // error page: counted by the status check below
+        if (written + len > MAX_IMAGE_BYTES) {
+          tooLarge = true;
+          return false;
+        }
+        if (file.write(data, len) != len) {
+          writeFailed = true;
+          return false;
+        }
+        for (size_t i = 0; i < len; i++) running = (running ^ data[i]) * FNV_PRIME;
+        written += len;
+        return !isDue(millis(), deadline);
+      },
+      [deadline]() { return isDue(millis(), deadline); });
+
+  const bool complete = http.responseComplete() && (!http.hasContentLength() || written == http.getContentLength());
+  http.end();
+  file.close();
+
+  if (code != 200 || writeFailed || tooLarge || !complete || written == 0) {
+    LOG_ERR("DESK", "Image download failed: code=%d written=%u complete=%d writeFailed=%d tooLarge=%d", code,
+            static_cast<unsigned>(written), complete, writeFailed, tooLarge);
+    Storage.remove(STAGED_PATH);
+    return false;
+  }
+  if (!validateBmp(STAGED_PATH)) {
+    Storage.remove(STAGED_PATH);
+    return false;
+  }
+  hash = running;
+  return true;
+}
+
+// Replaces status.bmp with status.new. The render task is locked out only for the remove and rename. If power
+// is lost between them, status.new still holds a complete validated image and recoverStagedImage() promotes it.
+bool DeskActivity::promoteStagedImage() {
+  RenderLock lock;
+  if (Storage.exists(IMAGE_PATH) && !Storage.remove(IMAGE_PATH)) {
+    LOG_ERR("DESK", "Cannot remove old %s", IMAGE_PATH);
+    return false;
+  }
+  if (!Storage.rename(STAGED_PATH, IMAGE_PATH)) {
+    LOG_ERR("DESK", "Cannot rename %s to %s", STAGED_PATH, IMAGE_PATH);
+    return false;
+  }
+  return true;
+}
+
+void DeskActivity::recoverStagedImage() {
+  if (!Storage.exists(STAGED_PATH)) return;
+  if (validateBmp(STAGED_PATH)) {
+    LOG_INF("DESK", "Promoting staged image left by an interrupted update");
+    promoteStagedImage();
+  } else {
+    Storage.remove(STAGED_PATH);
+  }
+}
+
+unsigned long DeskActivity::nextPollDelayMs() const {
+  const unsigned long base = static_cast<unsigned long>(config.pollS);
+  const unsigned long cap = std::max(base, MAX_BACKOFF_S);
+  unsigned long seconds = base;
+  for (uint8_t i = 0; i < failedPolls && seconds < cap; i++) seconds *= 2;
+  return std::min(seconds, cap) * 1000UL;
+}
+
+// Returns true when the server was reachable (whether or not the image changed).
+bool DeskActivity::checkForUpdate(const bool forced) {
+  if (WiFi.status() != WL_CONNECTED) {
+    LOG_INF("DESK", "Poll skipped: WiFi down");
+    WiFi.reconnect();
+    setOnline(false);
+    return false;
+  }
+
+  std::string version;
+  if (!config.versionUrl.empty()) {
+    if (!fetchVersion(version)) {
+      setOnline(false);
+      return false;
+    }
+    // An empty version carries no information, so it never counts as "unchanged".
+    if (!forced && !version.empty() && haveImageHash && version == lastVersion) {
+      setOnline(true);
+      return true;
+    }
+  }
+
+  uint32_t hash = 0;
+  if (!downloadToStaging(hash)) {
+    setOnline(false);
+    return false;
+  }
+
+  const bool changed = forced || !haveImageHash || hash != imageHash;
+  if (!changed) {
+    lastVersion = version;
+    Storage.remove(STAGED_PATH);
+    setOnline(true);
+    return true;
+  }
+  if (!promoteStagedImage()) {
+    setOnline(false);
+    return false;
+  }
+
+  imageHash = hash;
+  haveImageHash = true;
+  lastVersion = version;  // only after the swap, so a failed swap is retried on the next poll
+  {
+    RenderLock lock;
+    online = true;
+    forceFullRefresh = true;  // the first image and every changed image get a half refresh
+    overlayOnlyRender = false;
+  }
+  requestUpdate();
   return true;
 }
 
@@ -320,47 +572,23 @@ void DeskActivity::pollOnce() {
   const bool forced = forceRedownload;
   pollRequested = false;
   forceRedownload = false;
-  nextPollAt = millis() + static_cast<unsigned long>(config.pollS) * 1000UL;
 
-  if (WiFi.status() != WL_CONNECTED) {
-    LOG_INF("DESK", "Poll skipped: WiFi down");
-    WiFi.reconnect();
-    setOnline(false);
-    if (forced) requestUpdate();
-    return;
+  if (++pollCount % HEAP_LOG_EVERY_POLLS == 0) {
+    LOG_INF("DESK", "Poll %lu: heap free=%u maxAlloc=%u failedPolls=%u", static_cast<unsigned long>(pollCount),
+            static_cast<unsigned>(ESP.getFreeHeap()), static_cast<unsigned>(ESP.getMaxAllocHeap()),
+            static_cast<unsigned>(failedPolls));
   }
 
-  std::string version;
-  const bool haveVersionUrl = !config.versionUrl.empty();
-  if (haveVersionUrl) {
-    if (!fetchVersion(version)) {
-      setOnline(false);
-      if (forced) requestUpdate();
-      return;
-    }
-    if (!forced && haveImageHash && version == lastVersion) {
-      setOnline(true);
-      return;
-    }
-  }
-
-  if (!downloadImage()) {
-    setOnline(false);
-    if (forced) requestUpdate();
-    return;
-  }
-
-  uint32_t hash = 0;
-  const bool hashed = hashFile(IMAGE_PATH, hash);
-  const bool changed = forced || !hashed || !haveImageHash || hash != imageHash;
-  imageHash = hash;
-  haveImageHash = hashed;
-  lastVersion = version;
-  setOnline(true);
-  if (changed) requestUpdate();
+  const bool reachable = checkForUpdate(forced);
+  failedPolls = reachable ? 0 : static_cast<uint8_t>(std::min<int>(failedPolls + 1, MAX_BACKOFF_DOUBLINGS));
+  // Scheduled after the poll finishes, so a slow or failing poll never makes the next one start immediately.
+  nextPollAt = millis() + nextPollDelayMs();
 }
 
 void DeskActivity::render(RenderLock&&) {
+  const bool overlayOnly = overlayOnlyRender;
+  overlayOnlyRender = false;
+
   renderer.clearScreen();
 
   if (phase == Phase::CONFIG_ERROR) {
@@ -370,13 +598,13 @@ void DeskActivity::render(RenderLock&&) {
     drawOverlays();
   }
 
-  // Half refresh on the first paint and every full_refresh_every paints to clear fast-refresh ghosting.
-  const bool full = forceFullRefresh || refreshesSinceFull >= config.fullRefreshEvery;
+  // Half refresh clears fast-refresh ghosting. It is forced for the first paint and every image change; on top
+  // of that every full_refresh_every-th repaint that is not just a toast or the offline chip.
+  bool full = forceFullRefresh;
+  if (!full && !overlayOnly && ++rendersSinceFull >= config.fullRefreshEvery) full = true;
   if (full) {
     forceFullRefresh = false;
-    refreshesSinceFull = 0;
-  } else {
-    refreshesSinceFull++;
+    rendersSinceFull = 0;
   }
   renderer.displayBuffer(full ? HalDisplay::HALF_REFRESH : HalDisplay::FAST_REFRESH);
 }
@@ -389,7 +617,7 @@ void DeskActivity::drawImageOrPlaceholder() const {
   if (Storage.exists(IMAGE_PATH) && Storage.openFileForRead("DESK", IMAGE_PATH, file)) {
     Bitmap bitmap(file);
     if (bitmap.parseHeaders() == BmpReaderError::Ok) {
-      // The server is expected to send exactly screen-sized art; centre anything smaller.
+      // The server sends exactly screen-sized art; centre anything smaller.
       const int x = bitmap.getWidth() < pageWidth ? (pageWidth - bitmap.getWidth()) / 2 : 0;
       const int y = bitmap.getHeight() < pageHeight ? (pageHeight - bitmap.getHeight()) / 2 : 0;
       const bool drawn = renderer.drawBitmap(bitmap, x, y, pageWidth, pageHeight);

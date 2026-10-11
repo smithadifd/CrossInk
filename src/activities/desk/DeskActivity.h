@@ -35,13 +35,17 @@ class DeskActivity final : public Activity {
   Phase phase = Phase::CONNECTING;
   std::string configError;
   bool online = true;
-  bool forceFullRefresh = true;  // first paint and after returning from other screens
-  int refreshesSinceFull = 0;
+  bool forceFullRefresh = true;    // first paint, image changes, manual refresh, return from Wi-Fi screens
+  bool overlayOnlyRender = false;  // next render only adds/removes the toast or offline chip
+  int rendersSinceFull = 0;
   char toast[TOAST_CAPACITY] = {0};
   unsigned long toastUntil = 0;
 
   // Main-task only.
   DeskConfig config;
+  GfxRenderer::Orientation savedOrientation = GfxRenderer::Portrait;
+  bool wifiTuned = false;
+  bool prevAutoReconnect = true;
   bool shouldTearDownWifiOnExit = false;
   bool pollRequested = false;
   bool forceRedownload = false;
@@ -49,17 +53,29 @@ class DeskActivity final : public Activity {
   uint32_t imageHash = 0;
   std::string lastVersion;
   unsigned long nextPollAt = 0;
+  uint8_t failedPolls = 0;
+  uint32_t pollCount = 0;
+  bool followUpPending = false;
+  unsigned long followUpPollAt = 0;
+  bool actionInFlight = false;
+  bool cooldownActive = false;
+  unsigned long ignoreActionsUntil = 0;
 
   void launchWifiSelection();
   void onWifiSelectionComplete(bool connected);
   void startRunning();
 
   void pollOnce();
+  bool checkForUpdate(bool forced);
+  unsigned long nextPollDelayMs() const;
   bool fetchVersion(std::string& out);
-  bool downloadImage();
+  bool downloadToStaging(uint32_t& hash);
+  bool promoteStagedImage();
+  void recoverStagedImage();
   void setOnline(bool value);
 
   bool readRequestedAction(DeskAction& action) const;
+  bool zoneAt(int x, int y, DeskAction& action) const;
   void sendAction(DeskAction action);
   void setToast(const char* text, unsigned long durationMs);
 

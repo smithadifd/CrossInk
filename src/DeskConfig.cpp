@@ -1,14 +1,18 @@
 #include "DeskConfig.h"
 
 #include <ArduinoJson.h>
+#include <HalStorage.h>
 #include <Logging.h>
-#include <PersistableStore.h>
+#include <strings.h>
 
 #include <algorithm>
 #include <utility>
 
 namespace {
-bool isHttpUrl(const std::string& url) { return url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0; }
+// URL schemes are case-insensitive (RFC 3986); the HTTP client lowercases them when parsing.
+bool isHttpUrl(const std::string& url) {
+  return strncasecmp(url.c_str(), "http://", 7) == 0 || strncasecmp(url.c_str(), "https://", 8) == 0;
+}
 }  // namespace
 
 bool DeskConfig::fromJson(JsonVariantConst root, DeskConfig& out, std::string& error) {
@@ -38,9 +42,21 @@ bool DeskConfig::fromJson(JsonVariantConst root, DeskConfig& out, std::string& e
 }
 
 bool DeskConfig::load(DeskConfig& out, std::string& error) {
+  const String text = Storage.readFile(PATH);
+  if (text.isEmpty()) {
+    error = "missing or empty";
+    LOG_ERR("DESK", "%s: %s", PATH, error.c_str());
+    return false;
+  }
+  // Editors on Windows often save a UTF-8 byte order mark, which ArduinoJson rejects.
+  const char* json = text.c_str();
+  if (text.length() >= 3 && static_cast<uint8_t>(json[0]) == 0xEF && static_cast<uint8_t>(json[1]) == 0xBB &&
+      static_cast<uint8_t>(json[2]) == 0xBF) {
+    json += 3;
+  }
   JsonDocument doc;
-  if (!PersistableStoreBase::readDocFromFile(PATH, doc)) {
-    error = "missing, unreadable or not valid JSON";
+  if (deserializeJson(doc, json)) {
+    error = "not valid JSON";
     LOG_ERR("DESK", "%s: %s", PATH, error.c_str());
     return false;
   }
