@@ -219,7 +219,6 @@ void DeskActivity::startRunning() {
     RenderLock lock;
     phase = Phase::RUNNING;
     forceFullRefresh = true;  // clean repaint after the Wi-Fi screens
-    overlayOnlyRender = false;
   }
   pollRequested = true;  // fetch immediately instead of waiting a full interval
   requestUpdate();
@@ -238,7 +237,6 @@ void DeskActivity::loop() {
     {
       RenderLock lock;
       toast[0] = '\0';
-      overlayOnlyRender = true;
     }
     requestUpdate();
   }
@@ -383,7 +381,6 @@ void DeskActivity::setToast(const char* text, const unsigned long durationMs) {
     RenderLock lock;
     snprintf(toast, sizeof(toast), "%s", text);
     toastUntil = millis() + durationMs;
-    overlayOnlyRender = true;
   }
   requestUpdate();
 }
@@ -393,7 +390,6 @@ void DeskActivity::setOnline(const bool value) {
   {
     RenderLock lock;
     online = value;
-    overlayOnlyRender = true;
   }
   requestUpdate();
 }
@@ -555,14 +551,21 @@ bool DeskActivity::checkForUpdate(const bool forced) {
     return false;
   }
 
+  // Image changes repaint with a fast refresh (a server that redraws every minute must not flash the panel).
+  // The first image after entering Desk mode and every full_refresh_every-th changed image get a half refresh.
+  const bool firstImage = !haveImageHash;
+  const bool imageDiffers = firstImage || hash != imageHash;
+  if (imageDiffers) imageChangesSinceFull++;
+  const bool halfRefresh = firstImage || imageChangesSinceFull >= config.fullRefreshEvery;
+  if (halfRefresh) imageChangesSinceFull = 0;
+
   imageHash = hash;
   haveImageHash = true;
   lastVersion = version;  // only after the swap, so a failed swap is retried on the next poll
   {
     RenderLock lock;
     online = true;
-    forceFullRefresh = true;  // the first image and every changed image get a half refresh
-    overlayOnlyRender = false;
+    if (halfRefresh) forceFullRefresh = true;
   }
   requestUpdate();
   return true;
@@ -586,9 +589,6 @@ void DeskActivity::pollOnce() {
 }
 
 void DeskActivity::render(RenderLock&&) {
-  const bool overlayOnly = overlayOnlyRender;
-  overlayOnlyRender = false;
-
   renderer.clearScreen();
 
   if (phase == Phase::CONFIG_ERROR) {
@@ -598,14 +598,10 @@ void DeskActivity::render(RenderLock&&) {
     drawOverlays();
   }
 
-  // Half refresh clears fast-refresh ghosting. It is forced for the first paint and every image change; on top
-  // of that every full_refresh_every-th repaint that is not just a toast or the offline chip.
-  bool full = forceFullRefresh;
-  if (!full && !overlayOnly && ++rendersSinceFull >= config.fullRefreshEvery) full = true;
-  if (full) {
-    forceFullRefresh = false;
-    rendersSinceFull = 0;
-  }
+  // Half refresh clears fast-refresh ghosting. forceFullRefresh is set for the first paint, the first image,
+  // every full_refresh_every-th image change, a manual refresh, and the return from the Wi-Fi screens.
+  const bool full = forceFullRefresh;
+  forceFullRefresh = false;
   renderer.displayBuffer(full ? HalDisplay::HALF_REFRESH : HalDisplay::FAST_REFRESH);
 }
 

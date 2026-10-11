@@ -35,9 +35,7 @@ class DeskActivity final : public Activity {
   Phase phase = Phase::CONNECTING;
   std::string configError;
   bool online = true;
-  bool forceFullRefresh = true;    // first paint, image changes, manual refresh, return from Wi-Fi screens
-  bool overlayOnlyRender = false;  // next render only adds/removes the toast or offline chip
-  int rendersSinceFull = 0;
+  bool forceFullRefresh = true;  // half refresh on the next render: first paint/image, every Nth image change, etc.
   char toast[TOAST_CAPACITY] = {0};
   unsigned long toastUntil = 0;
 
@@ -53,6 +51,7 @@ class DeskActivity final : public Activity {
   uint32_t imageHash = 0;
   std::string lastVersion;
   unsigned long nextPollAt = 0;
+  int imageChangesSinceFull = 0;
   uint8_t failedPolls = 0;
   uint32_t pollCount = 0;
   bool followUpPending = false;

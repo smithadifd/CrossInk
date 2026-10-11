@@ -38,7 +38,7 @@ of starting.
 | `webhook_url` | yes | | `http://` or `https://` URL that receives actions. |
 | `version_url` | no, but strongly recommended | none | URL of a short text value that changes when the image changes. When set, the image is only downloaded and redrawn when this value changes. It also lets the reader notice an unreachable server within a few seconds, before trying the larger image download. |
 | `poll_s` | no | `60` | Seconds between checks. Clamped to 10-3600. |
-| `full_refresh_every` | no | `20` | Besides the half refresh given to the first image and to every changed image, every Nth other repaint (for example a system-triggered redraw) is also a half refresh. Repaints that only add or remove the action message or the offline label do not count. |
+| `full_refresh_every` | no | `20` | Image updates use a fast refresh, so a server that redraws every minute does not flash the panel. The first image after entering Desk mode, and every Nth image that actually changed, use a half refresh to clear ghosting. Only image changes are counted: unchanged polls, action messages and the offline label do not. Left (force refresh) always gives a half refresh. |
 
 URL schemes are case-insensitive. A UTF-8 byte order mark at the start of `desk.json` is ignored.
 
