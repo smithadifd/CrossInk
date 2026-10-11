@@ -43,6 +43,7 @@ class DeskActivity final : public Activity {
   DeskConfig config;
   GfxRenderer::Orientation savedOrientation = GfxRenderer::Portrait;
   bool wifiTuned = false;
+  bool wasWifiConnected = false;
   bool prevAutoReconnect = true;
   bool shouldTearDownWifiOnExit = false;
   bool pollRequested = false;

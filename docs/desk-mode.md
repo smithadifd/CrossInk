@@ -91,8 +91,8 @@ Power button setting, Power may also act as Confirm.
 After an action, a short message appears above the grid for a couple of seconds:
 
 - `Video call - sent`: the server answered with a 2xx status.
-- `Video call - sent (no reply)`: the request went out but no HTTP reply arrived within 3 seconds, although the
-  server still accepts connections. Treat it as probably delivered rather than pressing again.
+- `Video call - no reply, check lights`: no HTTP reply arrived within 3 seconds, but the server still accepts
+  connections. The request may or may not have gone through, so check the result before pressing again.
 - `Video call failed (HTTP 500)`, `failed (unreachable)` or `failed (no Wi-Fi)`: the action was not delivered.
 
 Further actions are ignored for about one second after each one, and while one is being sent. After a sent
@@ -131,14 +131,14 @@ empty body carries no information, so the image is downloaded on every check.
 
 `action` is one of `video_call`, `focus`, `evening`, `restore`. Reply with any 2xx status to acknowledge; the
 response body is ignored. Any other status is shown as a failure. If no reply arrives within 3 seconds the
-reader shows "sent (no reply)" or "failed (unreachable)" as described above. The reader does not retry.
+reader shows "no reply, check lights" or "failed (unreachable)" as described above. The reader does not retry.
 
 ## Offline behaviour
 
 If a check fails or Wi-Fi drops, the last good image stays on screen with a small "offline - retrying" label in
 the top-right corner. While offline the reader backs off: the wait before each retry doubles, up to 300 seconds
 (or `poll_s` if that is larger), and returns to `poll_s` after the first success. Pressing Left forces an
-immediate check.
+immediate check, and a check also runs as soon as Wi-Fi reconnects.
 
 A failed check blocks the screen only briefly: each request gives up after 3 seconds, and the next check is
 scheduled after the failed one has finished. Setting `version_url` keeps this short, because an unreachable

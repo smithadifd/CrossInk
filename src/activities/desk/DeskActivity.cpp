@@ -215,6 +215,7 @@ void DeskActivity::startRunning() {
   WiFi.setSleep(false);
   WiFi.setAutoReconnect(true);
   wifiTuned = true;
+  wasWifiConnected = WiFi.status() == WL_CONNECTED;
   {
     RenderLock lock;
     phase = Phase::RUNNING;
@@ -259,10 +260,16 @@ void DeskActivity::loop() {
       RenderLock lock;
       forceFullRefresh = true;
     }
+    imageChangesSinceFull = 0;  // this refresh is the half refresh
     forceRedownload = true;
     pollRequested = true;
     requestUpdate();
   }
+
+  // Wi-Fi came back: poll now rather than waiting out the offline backoff.
+  const bool wifiConnected = WiFi.status() == WL_CONNECTED;
+  if (wifiConnected && !wasWifiConnected) pollRequested = true;
+  wasWifiConnected = wifiConnected;
 
   if (followUpPending && isDue(now, followUpPollAt)) {
     followUpPending = false;
@@ -343,8 +350,8 @@ void DeskActivity::sendAction(const DeskAction action) {
     }
   }
 
-  // A transport failure after the request may already have gone out is not a failure the user should retry:
-  // if the server still accepts connections, report "sent (no reply)" so they do not press again.
+  // No HTTP reply is ambiguous: the request may or may not have gone through. The probe only separates a server
+  // that still accepts connections ("no reply") from one that is not there ("unreachable"); it does not prove delivery.
   const bool ok = code >= 200 && code < 300;
   const bool noReply = !ok && code <= 0 && wifiUp && tcpReachable(config.webhookUrl, PROBE_TIMEOUT_MS);
   LOG_INF("DESK", "Action %s -> %d%s", info.name, code, noReply ? " (no reply, server reachable)" : "");
@@ -353,7 +360,7 @@ void DeskActivity::sendAction(const DeskAction action) {
   if (ok) {
     snprintf(text, sizeof(text), "%s - sent", info.label);
   } else if (noReply) {
-    snprintf(text, sizeof(text), "%s - sent (no reply)", info.label);
+    snprintf(text, sizeof(text), "%s - no reply, check lights", info.label);
   } else if (code > 0) {
     snprintf(text, sizeof(text), "%s failed (HTTP %d)", info.label, code);
   } else if (!wifiUp) {
@@ -547,6 +554,8 @@ bool DeskActivity::checkForUpdate(const bool forced) {
     return true;
   }
   if (!promoteStagedImage()) {
+    // The swap may have removed status.bmp before failing, so make the next download repaint even if identical.
+    haveImageHash = false;
     setOnline(false);
     return false;
   }
