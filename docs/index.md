@@ -21,6 +21,7 @@ Welcome to CrossInk, a personal fork of CrossPoint Reader.
 - [Reading Stats Sync](./reading-stats-sync.md)
 - [Nearby File Transfer](./nearby-file-transfer.md)
 - [Nearby Position Sync](./nearby-position-sync.md)
+- [Desk Mode](./desk-mode.md)
 - [EPUB Indexing Methods](./epub-indexing.md)
 - [EPUB Render Modes](./epub-render-modes.md)
 - [Data Cache](./data-cache.md)

@@ -1,3 +1,9 @@
+## [Unreleased]
+
+### Added
+
+- Desk mode (Settings > System > Device) shows a server-rendered 480x800 status image, refreshes it when it changes, and sends webhook actions from a 2x2 touch grid or the buttons. See `docs/desk-mode.md`.
+
 ## [v1.6.1] - 2026-10-03
 
 ### Added
