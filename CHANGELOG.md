@@ -6,7 +6,7 @@
 
 ### Fixed
 
-- Desk mode no longer trusts the server: webhook replies, version text, response headers and the image download are read under byte and total-time limits, a failed image swap keeps the previous image, and an action whose delivery cannot be confirmed is reported as "not confirmed" instead of failed.
+- Desk mode no longer trusts the server: webhook replies, version text and the image download are read under byte and total-time limits, a failed image swap keeps the previous image, and an action whose delivery cannot be confirmed is reported as "not confirmed" instead of failed.
 
 ## [v1.6.1] - 2026-10-03
 

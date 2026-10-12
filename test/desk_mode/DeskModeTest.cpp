@@ -410,26 +410,36 @@ void cooldown_survives_the_counter_wrapping_mid_window() {
   CHECK(!cooldown.blocks(0x00000300u));
 }
 
-void radio_is_torn_down_only_when_desk_mode_brought_it_up() {
-  desk::RadioLease off;
-  off.enter(false, false);
-  CHECK(off.ownsRadio());
-  CHECK(off.onExit(true).teardown);
-  CHECK(!off.onExit(false).teardown);  // driver already gone
+void radio_refuses_entry_without_claiming_an_active_access_point() {
+  desk::RadioLease lease;
+  const desk::RadioEntryDecision decision = lease.enter(false, true);
+  CHECK_MSG(decision == desk::RadioEntryDecision::REFUSE_ACTIVE_ACCESS_POINT,
+            "Wi-Fi selection was allowed while another screen's access point was active");
+  CHECK_MSG(!lease.ownsRadio(), "another screen's access point was claimed");
+  const desk::RadioLease::ExitPlan plan = lease.onExit(true);
+  CHECK_MSG(!plan.teardown, "another screen's access point would be torn down on exit");
+  CHECK_MSG(!plan.restoreTuning, "radio tuning would be restored even though Desk mode did not change it");
+}
 
-  desk::RadioLease connected;
-  connected.enter(true, false);
-  CHECK(!connected.ownsRadio());
-  CHECK(!connected.onExit(true).teardown);
+void radio_uses_an_existing_station_without_claiming_it() {
+  desk::RadioLease lease;
+  const desk::RadioEntryDecision decision = lease.enter(true, false);
+  CHECK(decision == desk::RadioEntryDecision::USE_CONNECTED_STATION);
+  CHECK(!lease.ownsRadio());
+  CHECK(!lease.onExit(true).teardown);
 
-  desk::RadioLease accessPoint;  // another screen's hotspot: not connected as a station, but not ours either
-  accessPoint.enter(false, true);
-  CHECK_MSG(!accessPoint.ownsRadio(), "an access point started by another screen was claimed");
-  CHECK(!accessPoint.onExit(true).teardown);
+  desk::RadioLease stationAndAccessPoint;
+  CHECK(stationAndAccessPoint.enter(true, true) == desk::RadioEntryDecision::USE_CONNECTED_STATION);
+  CHECK(!stationAndAccessPoint.ownsRadio());
+}
 
-  desk::RadioLease both;
-  both.enter(true, true);
-  CHECK(!both.onExit(true).teardown);
+void radio_allows_selection_and_owns_the_connection_it_starts() {
+  desk::RadioLease lease;
+  const desk::RadioEntryDecision decision = lease.enter(false, false);
+  CHECK(decision == desk::RadioEntryDecision::SELECT_NETWORK);
+  CHECK(lease.ownsRadio());
+  CHECK(lease.onExit(true).teardown);
+  CHECK(!lease.onExit(false).teardown);  // driver already gone
 }
 
 void radio_tuning_is_restored_to_what_it_was() {
@@ -485,7 +495,9 @@ const Test TESTS[] = {
     TEST(cooldown_blocks_only_inside_its_window),
     TEST(cooldown_does_not_come_back_after_a_long_idle),
     TEST(cooldown_survives_the_counter_wrapping_mid_window),
-    TEST(radio_is_torn_down_only_when_desk_mode_brought_it_up),
+    TEST(radio_refuses_entry_without_claiming_an_active_access_point),
+    TEST(radio_uses_an_existing_station_without_claiming_it),
+    TEST(radio_allows_selection_and_owns_the_connection_it_starts),
     TEST(radio_tuning_is_restored_to_what_it_was),
 };
 

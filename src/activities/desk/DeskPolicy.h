@@ -93,6 +93,12 @@ inline bool webhookMayHaveTakenEffect(const WebhookOutcome outcome) {
 // Wi-Fi state Desk mode must hand back on exit. Desk mode tears Wi-Fi down only when it was the one to bring it up:
 // a station link that was already connected, or an access point another screen is running, belongs to that screen.
 // The power-save mode and auto-reconnect it replaced with its own keep-alive tuning are put back as they were.
+enum class RadioEntryDecision : uint8_t {
+  USE_CONNECTED_STATION,
+  SELECT_NETWORK,
+  REFUSE_ACTIVE_ACCESS_POINT,
+};
+
 class RadioLease {
  public:
   struct ExitPlan {
@@ -102,8 +108,11 @@ class RadioLease {
     bool teardown;
   };
 
-  void enter(const bool stationConnected, const bool accessPointActive) {
+  RadioEntryDecision enter(const bool stationConnected, const bool accessPointActive) {
     owns_ = !stationConnected && !accessPointActive;
+    if (stationConnected) return RadioEntryDecision::USE_CONNECTED_STATION;
+    if (accessPointActive) return RadioEntryDecision::REFUSE_ACTIVE_ACCESS_POINT;
+    return RadioEntryDecision::SELECT_NETWORK;
   }
 
   // Called just before Desk mode changes the power-save mode and auto-reconnect.

@@ -149,15 +149,22 @@ void DeskActivity::onEnter() {
     return;
   }
 
-  // Wi-Fi that is already connected, or an access point another screen is running, is not ours to turn off.
   const bool stationConnected = WiFi.status() == WL_CONNECTED;
   const bool accessPointActive = (WiFi.getMode() & WIFI_MODE_AP) != 0;
-  radio.enter(stationConnected, accessPointActive);
-  if (stationConnected) {
-    startRunning();
-    return;
+  switch (radio.enter(stationConnected, accessPointActive)) {
+    case desk::RadioEntryDecision::USE_CONNECTED_STATION:
+      startRunning();
+      return;
+    case desk::RadioEntryDecision::SELECT_NETWORK:
+      launchWifiSelection();
+      return;
+    case desk::RadioEntryDecision::REFUSE_ACTIVE_ACCESS_POINT: {
+      RenderLock lock;
+      phase = Phase::WIFI_ERROR;
+    }
+      requestUpdate();
+      return;
   }
-  launchWifiSelection();
 }
 
 void DeskActivity::onExit() {
@@ -543,6 +550,8 @@ void DeskActivity::render(RenderLock&&) {
 
   if (phase == Phase::CONFIG_ERROR) {
     drawConfigError();
+  } else if (phase == Phase::WIFI_ERROR) {
+    drawWifiError();
   } else {
     drawImageOrPlaceholder();
     drawOverlays();
@@ -598,6 +607,18 @@ void DeskActivity::drawConfigError() const {
   renderer.drawCenteredText(SMALL_FONT_ID, y, "image_url, webhook_url (required)");
   y += step;
   renderer.drawCenteredText(SMALL_FONT_ID, y, "version_url, poll_s, full_refresh_every");
+  y += step * 2;
+  renderer.drawCenteredText(UI_10_FONT_ID, y, "Press Back to exit");
+}
+
+void DeskActivity::drawWifiError() const {
+  int y = renderer.getScreenHeight() / 2 - 50;
+  const int step = renderer.getLineHeight(UI_10_FONT_ID) + 6;
+  renderer.drawCenteredText(UI_12_FONT_ID, y, "Desk mode", true, EpdFontFamily::BOLD);
+  y += step + 10;
+  renderer.drawCenteredText(UI_10_FONT_ID, y, "Desk mode needs Wi-Fi.");
+  y += step;
+  renderer.drawCenteredText(UI_10_FONT_ID, y, "Stop the hotspot first.");
   y += step * 2;
   renderer.drawCenteredText(UI_10_FONT_ID, y, "Press Back to exit");
 }

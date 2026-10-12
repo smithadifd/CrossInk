@@ -27,7 +27,7 @@ class DeskActivity final : public Activity {
   bool preventAutoSleep() override;
 
  private:
-  enum class Phase : uint8_t { CONFIG_ERROR, CONNECTING, RUNNING };
+  enum class Phase : uint8_t { CONFIG_ERROR, WIFI_ERROR, CONNECTING, RUNNING };
   enum class DeskAction : uint8_t { VIDEO_CALL, FOCUS, EVENING, RESTORE, COUNT };
 
   static constexpr size_t TOAST_CAPACITY = 40;
@@ -79,5 +79,6 @@ class DeskActivity final : public Activity {
 
   void drawImageOrPlaceholder() const;
   void drawConfigError() const;
+  void drawWifiError() const;
   void drawOverlays() const;
 };
