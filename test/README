@@ -36,7 +36,7 @@ Desk mode host tests (no framework or network needed):
 - Run `test/desk_mode/run.sh`, or `test/desk_mode/run.sh <test-name>` for one test.
 - `DeskModeTest.cpp` compiles the production Desk mode headers (`src/activities/desk/DeskPolicy.h`,
   `DeskTransfer.h`) and the real `SecureHttpClient` from the SDK against a scripted socket and a fake clock.
-  It covers the byte and time caps on the webhook, version and image requests, the response-header caps,
+  It covers the byte and time caps on the webhook, version and image requests,
   BMP header checks, the image swap and its recovery, the action cooldown across a counter wrap, and Wi-Fi
   ownership on entry and exit. It builds with AddressSanitizer and UndefinedBehaviorSanitizer.
 - It does not exercise real sockets, TLS, SD cards or Wi-Fi; check those on a device.

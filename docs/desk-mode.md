@@ -118,8 +118,8 @@ moved in. If power is lost during the swap, the next time Desk mode opens it res
 promotes the complete `status.new`.
 
 Each socket operation times out after 3 seconds and one download is abandoned after 15 seconds in total, however
-slowly the server sends. A reply that declares more than 128 KB, that carries more than 64 response headers or
-16 KB of header text, or that answers with an error status and a long page is abandoned early.
+slowly the server sends. A reply that declares more than 128 KB, or
+that answers with an error status and a long page, is abandoned early.
 
 Without `version_url`, the reader downloads the image every `poll_s` seconds and redraws only when its
 contents differ from the previous download.

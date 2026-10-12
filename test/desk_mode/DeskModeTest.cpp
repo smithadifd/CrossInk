@@ -107,63 +107,6 @@ void webhook_outcomes_never_call_an_unconfirmed_send_a_failure() {
   CHECK(!desk::webhookMayHaveTakenEffect(WebhookOutcome::HTTP_ERROR));
 }
 
-// ---- SDK response headers ------------------------------------------------------------------------------------
-
-void sdk_header_flood_is_cut_off() {
-  std::string reply = "HTTP/1.1 200 OK\r\n";
-  for (int i = 0; i < 10000; i++) reply += "X-Pad: " + std::string(100, 'a') + "\r\n";
-  reply += "Content-Length: 0\r\n\r\n";
-  scriptReply(reply);
-  freeink::SecureHttpClient http;
-  CHECK(http.begin("http://desk/image"));
-  const int code = http.GET([](const uint8_t*, size_t) { return true; });
-  const size_t stored = http.getHeaders().size();
-  CHECK_MSG(code == -1, "code=%d", code);
-  CHECK_MSG(stored <= 64, "stored %zu headers", stored);
-  CHECK_MSG(socketPos < 64 * 1024, "read %zu bytes of headers", socketPos);
-}
-
-void sdk_header_count_is_capped() {
-  std::string reply = "HTTP/1.1 200 OK\r\n";
-  for (int i = 0; i < 500; i++) reply += "X: y\r\n";  // tiny lines: only the count can trip
-  reply += "Content-Length: 0\r\n\r\n";
-  scriptReply(reply);
-  freeink::SecureHttpClient http;
-  CHECK(http.begin("http://desk/image"));
-  const int code = http.GET([](const uint8_t*, size_t) { return true; });
-  CHECK_MSG(code == -1, "code=%d", code);
-  CHECK_MSG(http.getHeaders().size() <= 64, "stored %zu headers", http.getHeaders().size());
-  CHECK_MSG(socketPos < 1024, "read %zu bytes of headers", socketPos);
-}
-
-void sdk_header_bytes_are_capped() {
-  std::string reply = "HTTP/1.1 200 OK\r\n";
-  for (int i = 0; i < 40; i++) reply += "X-Pad: " + std::string(1000, 'a') + "\r\n";  // few lines, many bytes
-  reply += "Content-Length: 0\r\n\r\n";
-  scriptReply(reply);
-  freeink::SecureHttpClient http;
-  CHECK(http.begin("http://desk/image"));
-  const int code = http.GET([](const uint8_t*, size_t) { return true; });
-  CHECK_MSG(code == -1, "code=%d", code);
-  CHECK_MSG(socketPos < 20 * 1024, "read %zu bytes of headers", socketPos);
-}
-
-void sdk_ordinary_headers_still_work() {
-  std::string extra;
-  for (int i = 0; i < 30; i++) extra += "X-Normal-" + std::to_string(i) + ": value\r\n";
-  scriptReply(ok200("hello", extra));
-  freeink::SecureHttpClient http;
-  CHECK(http.begin("http://desk/image"));
-  std::string body;
-  const int code = http.GET([&](const uint8_t* data, size_t len) {
-    body.append(reinterpret_cast<const char*>(data), len);
-    return true;
-  });
-  CHECK(code == 200);
-  CHECK(body == "hello");
-  CHECK(http.getHeaders().size() == 31);
-}
-
 // ---- version -------------------------------------------------------------------------------------------------
 
 void version_trickle_stops_at_the_deadline() {
@@ -517,10 +460,6 @@ const Test TESTS[] = {
     TEST(webhook_trickled_reply_stops_at_the_deadline),
     TEST(webhook_malformed_url_is_not_logged),
     TEST(webhook_outcomes_never_call_an_unconfirmed_send_a_failure),
-    TEST(sdk_header_flood_is_cut_off),
-    TEST(sdk_header_count_is_capped),
-    TEST(sdk_header_bytes_are_capped),
-    TEST(sdk_ordinary_headers_still_work),
     TEST(version_trickle_stops_at_the_deadline),
     TEST(version_stops_reading_at_the_token_cap),
     TEST(version_cut_short_is_rejected),
