@@ -4,6 +4,10 @@
 
 - Desk mode (Settings > System > Device) shows a server-rendered 480x800 status image, refreshes it when it changes, and sends webhook actions from a 2x2 touch grid or the buttons. See `docs/desk-mode.md`.
 
+### Fixed
+
+- Desk mode no longer trusts the server: webhook replies, version text and the image download are read under byte and total-time limits, a failed image swap keeps the previous image, and an action whose delivery cannot be confirmed is reported as "not confirmed" instead of failed.
+
 ## [v1.6.1] - 2026-10-03
 
 ### Added

@@ -4,6 +4,7 @@
 #include <string>
 
 #include "DeskConfig.h"
+#include "DeskPolicy.h"
 #include "activities/Activity.h"
 
 // Desk mode: keeps a server-rendered 1-bit status screen on the display and turns taps or button
@@ -26,7 +27,7 @@ class DeskActivity final : public Activity {
   bool preventAutoSleep() override;
 
  private:
-  enum class Phase : uint8_t { CONFIG_ERROR, CONNECTING, RUNNING };
+  enum class Phase : uint8_t { CONFIG_ERROR, WIFI_ERROR, CONNECTING, RUNNING };
   enum class DeskAction : uint8_t { VIDEO_CALL, FOCUS, EVENING, RESTORE, COUNT };
 
   static constexpr size_t TOAST_CAPACITY = 40;
@@ -42,10 +43,8 @@ class DeskActivity final : public Activity {
   // Main-task only.
   DeskConfig config;
   GfxRenderer::Orientation savedOrientation = GfxRenderer::Portrait;
-  bool wifiTuned = false;
   bool wasWifiConnected = false;
-  bool prevAutoReconnect = true;
-  bool shouldTearDownWifiOnExit = false;
+  desk::RadioLease radio;
   bool pollRequested = false;
   bool forceRedownload = false;
   bool haveImageHash = false;
@@ -58,8 +57,7 @@ class DeskActivity final : public Activity {
   bool followUpPending = false;
   unsigned long followUpPollAt = 0;
   bool actionInFlight = false;
-  bool cooldownActive = false;
-  unsigned long ignoreActionsUntil = 0;
+  desk::ActionCooldown cooldown;
 
   void launchWifiSelection();
   void onWifiSelectionComplete(bool connected);
@@ -81,5 +79,6 @@ class DeskActivity final : public Activity {
 
   void drawImageOrPlaceholder() const;
   void drawConfigError() const;
+  void drawWifiError() const;
   void drawOverlays() const;
 };
