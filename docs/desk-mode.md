@@ -86,15 +86,20 @@ rectangles (desk-panel clips its bottom boxes at 752 too), so every drawn box is
 between the rectangles do nothing. The left-edge Back swipe is a
 horizontal swipe, so it does not conflict with taps inside the left cells.
 
-The Home key and bottom-edge Home swipe also leave Desk mode, like on any other screen. Depending on the
-Power button setting, Power may also act as Confirm.
+Leaving Desk mode with Home works like on any other screen. On the X4 Pro the capacitive Home key leaves it
+(a tap, while **Home Button > Tap** is set to its default of going back to Home); the bottom-edge swipe is that
+device's menu gesture and does not exit. On touch devices without a Home key, an upward swipe from the bottom
+edge leaves Desk mode. Depending on the Power button setting, Power may also act as Confirm.
 
 After an action, a short message appears above the grid for a couple of seconds:
 
 - `Video call - sent`: the server answered with a 2xx status.
 - `Video call - no reply, check lights`: no HTTP reply arrived within 3 seconds, but the server still accepts
   connections. The request may or may not have gone through, so check the result before pressing again.
-- `Video call failed (HTTP 500)`, `failed (unreachable)` or `failed (no Wi-Fi)`: the action was not delivered.
+- `Video call - not confirmed`: no HTTP reply arrived and the server is not accepting connections now. The
+  request may have reached it before the connection dropped, so check the result before pressing again.
+- `Video call failed (HTTP 500)`, `failed (bad URL)` or `failed (no Wi-Fi)`: the action was not delivered, or
+  the server refused it.
 
 Further actions are ignored for about one second after each one, and while one is being sent. After a sent
 action the reader checks for a new image about 2 seconds later and again about 6 seconds later, so a server that
@@ -108,9 +113,13 @@ redraws in response shows the result quickly.
 at most 128 KB. The reader streams it to `/.crosspoint/desk/status.new` and accepts it only if the header
 matches and the file is at least as long as the header says (offset to pixel data plus 60 bytes per row times
 800 rows). Only then is `status.bmp` replaced, so a failed, truncated or wrong-format download never blanks the
-screen. If power is lost during the swap, the complete `status.new` is promoted the next time Desk mode opens.
+screen. During the swap the previous image is set aside as `status.old` and put back if the new one cannot be
+moved in. If power is lost during the swap, the next time Desk mode opens it restores the old image and then
+promotes the complete `status.new`.
 
-Each socket operation times out after 3 seconds and one download is abandoned after 15 seconds in total.
+Each socket operation times out after 3 seconds and one download is abandoned after 15 seconds in total, however
+slowly the server sends. A reply that declares more than 128 KB, that carries more than 64 response headers or
+16 KB of header text, or that answers with an error status and a long page is abandoned early.
 
 Without `version_url`, the reader downloads the image every `poll_s` seconds and redraws only when its
 contents differ from the previous download.
@@ -119,8 +128,9 @@ contents differ from the previous download.
 
 `GET version_url` returns a short plain-text body (an ISO timestamp, a counter, or a hash; only the first 128
 bytes are used and surrounding whitespace is ignored) that changes whenever the image changes. Respond with
-HTTP 200. Requests time out after 3 seconds. Any other status is treated as the server being unreachable. An
-empty body carries no information, so the image is downloaded on every check.
+HTTP 200 with the whole body delivered. Requests time out after 3 seconds and are abandoned after 6 seconds in
+total. Any other status, or a body cut short by a dropped connection, is treated as the server being unreachable.
+An empty body carries no information, so the image is downloaded on every check.
 
 ### Webhook
 
@@ -131,8 +141,9 @@ empty body carries no information, so the image is downloaded on every check.
 ```
 
 `action` is one of `video_call`, `focus`, `evening`, `restore`. Reply with any 2xx status to acknowledge; the
-response body is ignored. Any other status is shown as a failure. If no reply arrives within 3 seconds the
-reader shows "no reply, check lights" or "failed (unreachable)" as described above. The reader does not retry.
+response body is ignored (the reader reads at most 4 KB of it and gives up on the request after 8 seconds in
+total). Any other status is shown as a failure. If no reply arrives within 3 seconds the reader shows "no reply,
+check lights" or "not confirmed" as described above. The reader does not retry.
 
 ## Offline behaviour
 
@@ -151,7 +162,8 @@ server is detected by the small version request before the image download is att
 - On battery the normal sleep timeout applies, and Wi-Fi is turned off when the reader sleeps. There is no
   timer wake: press Power to wake it, then open Desk mode again.
 - Leaving Desk mode restores the Wi-Fi power-save and auto-reconnect settings it changed, and turns Wi-Fi off if
-  Desk mode turned it on.
+  Desk mode turned it on. Wi-Fi that was already connected, or an access point another screen was running, is
+  left as it was.
 
 ## Troubleshooting
 
@@ -159,5 +171,5 @@ server is detected by the small version request before the image download is att
   required URL. The line under the path names the problem.
 - **"Waiting for image..." stays up**: the first download has not succeeded. Check `image_url` from another
   device, confirm it is a 480 x 800 1-bit BMP, and look at the serial log (tag `DESK`).
-- **"failed (unreachable)"**: the webhook server did not answer or accept a connection within 3 seconds, or Wi-Fi is
-  down.
+- **"not confirmed"**: the webhook server did not answer or accept a connection within 3 seconds. The action may
+  still have been delivered, so check before pressing again.
