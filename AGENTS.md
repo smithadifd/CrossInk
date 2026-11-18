@@ -5,6 +5,8 @@ This is the canonical repo instruction file.
 
 Project: Open-source e-reader firmware for ESP32-C3 and ESP32-S3 devices.
 
+Release class: versioned — fork: follows the upstream's tags and changelog and cuts no Releases of its own
+
 ## Architecture And Fast Navigation
 
 Start narrow. Read the named entry point and its direct collaborators before
